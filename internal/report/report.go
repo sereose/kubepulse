@@ -144,6 +144,9 @@ func (r *Report) Markdown() string {
 	w("# kubepulse audit report\n\n")
 	w("**Score: %d/100 (grade %s)** · %d findings · generated %s\n\n",
 		r.Score, r.Grade, r.Summary.Total, r.GeneratedAt.Format("2006-01-02 15:04 UTC"))
+	if len(r.Warnings) > 0 {
+		w("> ⚠ %d resource type(s) could not be listed — see Coverage gaps below. Treat the score as an upper bound.\n\n", len(r.Warnings))
+	}
 
 	w("## Cluster\n\n")
 	w("| | |\n|---|---|\n")
@@ -191,7 +194,8 @@ func (r *Report) Markdown() string {
 	}
 
 	if len(r.Warnings) > 0 {
-		w("## Warnings\n\n")
+		w("## Coverage gaps\n\n")
+		w("Some resource types could not be listed, so checks depending on them were skipped or incomplete. The score is an upper bound.\n\n")
 		for _, wn := range r.Warnings {
 			w("- %s\n", wn)
 		}

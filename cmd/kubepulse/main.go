@@ -106,6 +106,14 @@ func run(args []string, stdout, stderr *os.File) error {
 		}
 	}
 
+	if snap.Empty() {
+		msg := "snapshot contains no pods, nodes or workloads — nothing to audit"
+		if len(snap.Warnings) > 0 {
+			msg += "\n  " + strings.Join(snap.Warnings, "\n  ")
+		}
+		return errors.New(msg)
+	}
+
 	if *save != "" {
 		if err := snap.SaveFile(*save); err != nil {
 			return fmt.Errorf("save snapshot: %w", err)

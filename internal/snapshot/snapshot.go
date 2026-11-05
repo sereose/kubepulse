@@ -95,16 +95,24 @@ func Collect(ctx context.Context, opts Options) (*Snapshot, error) {
 func CollectFrom(ctx context.Context, cs kubernetes.Interface, opts Options) (*Snapshot, error) {
 	snap := &Snapshot{CollectedAt: time.Now().UTC()}
 
+	// Pods are the one resource every check depends on. If we cannot list
+	// them, there is no audit — fail loudly instead of printing a perfect
+	// score for an unreachable cluster.
+	ns := opts.Namespace
+	lo := metav1.ListOptions{}
+	pods, err := cs.CoreV1().Pods(ns).List(ctx, lo)
+	if err != nil {
+		return nil, fmt.Errorf("cannot list pods (is the cluster reachable and are you authorised?): %w", err)
+	}
+	snap.Pods = pods.Items
+
 	if v, err := cs.Discovery().ServerVersion(); err == nil && v != nil {
 		snap.ServerVersion = v.GitVersion
 	} else if err != nil {
 		snap.warn("server version: %v", err)
 	}
 
-	ns := opts.Namespace
-	lo := metav1.ListOptions{}
-
-	// Cluster-scoped.
+	// Everything else is best-effort: RBAC frequently forbids some types.
 	if l, err := cs.CoreV1().Namespaces().List(ctx, lo); err == nil {
 		snap.Namespaces = l.Items
 	} else {
@@ -114,13 +122,6 @@ func CollectFrom(ctx context.Context, cs kubernetes.Interface, opts Options) (*S
 		snap.Nodes = l.Items
 	} else {
 		snap.warn("list nodes: %v", err)
-	}
-
-	// Namespaced (ns == "" means all).
-	if l, err := cs.CoreV1().Pods(ns).List(ctx, lo); err == nil {
-		snap.Pods = l.Items
-	} else {
-		snap.warn("list pods: %v", err)
 	}
 	if l, err := cs.AppsV1().Deployments(ns).List(ctx, lo); err == nil {
 		snap.Deployments = l.Items
@@ -180,6 +181,13 @@ func CollectFrom(ctx context.Context, cs kubernetes.Interface, opts Options) (*S
 
 	snap.scrub()
 	return snap, nil
+}
+
+// Empty reports whether the snapshot holds nothing to audit. A loaded file
+// can be empty even though a live collection cannot.
+func (s *Snapshot) Empty() bool {
+	return len(s.Pods) == 0 && len(s.Nodes) == 0 && len(s.Deployments) == 0 &&
+		len(s.StatefulSets) == 0 && len(s.DaemonSets) == 0
 }
 
 func (s *Snapshot) warn(format string, args ...any) {

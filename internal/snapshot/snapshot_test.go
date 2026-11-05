@@ -2,13 +2,17 @@ package snapshot
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestCollectFromFakeClientset(t *testing.T) {
@@ -60,6 +64,42 @@ func TestCollectFromFakeClientset(t *testing.T) {
 	}
 	if len(snap.Deployments) != 1 || snap.Deployments[0].Name != "d1" {
 		t.Errorf("namespace filter failed: %+v", snap.Deployments)
+	}
+}
+
+func TestCollectFromFailsWhenPodsUnlistable(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("dial tcp 100.64.0.147:443: connect: connection refused")
+	})
+	_, err := CollectFrom(context.Background(), cs, Options{})
+	if err == nil {
+		t.Fatal("expected an error when pods cannot be listed; a perfect score for an unreachable cluster is a bug")
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("error should carry the cause: %v", err)
+	}
+}
+
+func TestCollectFromToleratesPartialRBAC(t *testing.T) {
+	cs := fake.NewSimpleClientset(
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "a"}},
+	)
+	cs.PrependReactor("list", "nodes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("nodes is forbidden")
+	})
+	snap, err := CollectFrom(context.Background(), cs, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Pods) != 1 || len(snap.Warnings) != 1 || !strings.Contains(snap.Warnings[0], "forbidden") {
+		t.Errorf("expected pods collected and one RBAC warning, got pods=%d warnings=%v", len(snap.Pods), snap.Warnings)
+	}
+	if snap.Empty() {
+		t.Error("snapshot with pods must not be Empty")
+	}
+	if !(&Snapshot{}).Empty() {
+		t.Error("zero snapshot must be Empty")
 	}
 }
 
