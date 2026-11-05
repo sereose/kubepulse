@@ -15,6 +15,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -34,26 +35,26 @@ type Snapshot struct {
 	ServerVersion string    `json:"serverVersion"`
 	ContextName   string    `json:"contextName,omitempty"`
 
-	Namespaces     []corev1.Namespace                    `json:"namespaces"`
-	Nodes          []corev1.Node                         `json:"nodes"`
-	Pods           []corev1.Pod                          `json:"pods"`
-	Deployments    []appsv1.Deployment                   `json:"deployments"`
-	StatefulSets   []appsv1.StatefulSet                  `json:"statefulSets"`
-	DaemonSets     []appsv1.DaemonSet                    `json:"daemonSets"`
-	Services       []corev1.Service                      `json:"services"`
-	PVCs           []corev1.PersistentVolumeClaim        `json:"pvcs"`
-	PDBs           []policyv1.PodDisruptionBudget        `json:"pdbs"`
-	HPAs           []autoscalingv2.HorizontalPodAutoscaler `json:"hpas"`
-	ResourceQuotas []corev1.ResourceQuota                `json:"resourceQuotas"`
-	LimitRanges    []corev1.LimitRange                   `json:"limitRanges"`
+	Namespaces      []corev1.Namespace                      `json:"namespaces"`
+	Nodes           []corev1.Node                           `json:"nodes"`
+	Pods            []corev1.Pod                            `json:"pods"`
+	Deployments     []appsv1.Deployment                     `json:"deployments"`
+	StatefulSets    []appsv1.StatefulSet                    `json:"statefulSets"`
+	DaemonSets      []appsv1.DaemonSet                      `json:"daemonSets"`
+	Services        []corev1.Service                        `json:"services"`
+	PVCs            []corev1.PersistentVolumeClaim          `json:"pvcs"`
+	PDBs            []policyv1.PodDisruptionBudget          `json:"pdbs"`
+	HPAs            []autoscalingv2.HorizontalPodAutoscaler `json:"hpas"`
+	ResourceQuotas  []corev1.ResourceQuota                  `json:"resourceQuotas"`
+	LimitRanges     []corev1.LimitRange                     `json:"limitRanges"`
+	NetworkPolicies []networkingv1.NetworkPolicy            `json:"networkPolicies"`
+	Ingresses       []networkingv1.Ingress                  `json:"ingresses"`
 
 	// Warnings records non-fatal collection problems (e.g. RBAC denied a list).
 	Warnings []string `json:"warnings,omitempty"`
 }
 
-// Collect queries the cluster and returns a Snapshot. Individual list failures
-// are recorded as warnings rather than aborting the audit, because a prospect's
-// RBAC frequently forbids some resource types.
+// Collect builds a clientset from kubeconfig and delegates to CollectFrom.
 func Collect(ctx context.Context, opts Options) (*Snapshot, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if opts.Kubeconfig != "" {
@@ -68,22 +69,35 @@ func Collect(ctx context.Context, opts Options) (*Snapshot, error) {
 	}
 	restCfg.QPS = 50
 	restCfg.Burst = 100
+	restCfg.UserAgent = "kubepulse"
 
 	cs, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		return nil, err
 	}
 
-	snap := &Snapshot{CollectedAt: time.Now().UTC()}
+	snap, err := CollectFrom(ctx, cs, opts)
+	if err != nil {
+		return nil, err
+	}
 	if raw, err := cfg.RawConfig(); err == nil {
 		snap.ContextName = raw.CurrentContext
 		if opts.Context != "" {
 			snap.ContextName = opts.Context
 		}
 	}
-	if v, err := cs.Discovery().ServerVersion(); err == nil {
+	return snap, nil
+}
+
+// CollectFrom queries the cluster through an existing clientset. Individual
+// list failures are recorded as warnings rather than aborting the audit,
+// because a prospect's RBAC frequently forbids some resource types.
+func CollectFrom(ctx context.Context, cs kubernetes.Interface, opts Options) (*Snapshot, error) {
+	snap := &Snapshot{CollectedAt: time.Now().UTC()}
+
+	if v, err := cs.Discovery().ServerVersion(); err == nil && v != nil {
 		snap.ServerVersion = v.GitVersion
-	} else {
+	} else if err != nil {
 		snap.warn("server version: %v", err)
 	}
 
@@ -153,8 +167,17 @@ func Collect(ctx context.Context, opts Options) (*Snapshot, error) {
 	} else {
 		snap.warn("list limitranges: %v", err)
 	}
+	if l, err := cs.NetworkingV1().NetworkPolicies(ns).List(ctx, lo); err == nil {
+		snap.NetworkPolicies = l.Items
+	} else {
+		snap.warn("list networkpolicies: %v", err)
+	}
+	if l, err := cs.NetworkingV1().Ingresses(ns).List(ctx, lo); err == nil {
+		snap.Ingresses = l.Items
+	} else {
+		snap.warn("list ingresses: %v", err)
+	}
 
-	// Strip bulky, irrelevant fields so saved snapshots stay small and shareable.
 	snap.scrub()
 	return snap, nil
 }
@@ -163,12 +186,22 @@ func (s *Snapshot) warn(format string, args ...any) {
 	s.Warnings = append(s.Warnings, fmt.Sprintf(format, args...))
 }
 
-// scrub removes managedFields and last-applied annotations. These can be
-// hundreds of KB per object and never inform a check.
+// scrub removes managedFields, last-applied annotations and node image lists.
+// These can be hundreds of KB per object and never inform a check. It also
+// drops container environment variables, which may carry inline secrets, so a
+// saved snapshot is safe to share with a reviewer.
 func (s *Snapshot) scrub() {
 	clean := func(om *metav1.ObjectMeta) {
 		om.ManagedFields = nil
 		delete(om.Annotations, "kubectl.kubernetes.io/last-applied-configuration")
+	}
+	stripEnv := func(spec *corev1.PodSpec) {
+		for i := range spec.Containers {
+			spec.Containers[i].Env = nil
+		}
+		for i := range spec.InitContainers {
+			spec.InitContainers[i].Env = nil
+		}
 	}
 	for i := range s.Namespaces {
 		clean(&s.Namespaces[i].ObjectMeta)
@@ -179,15 +212,19 @@ func (s *Snapshot) scrub() {
 	}
 	for i := range s.Pods {
 		clean(&s.Pods[i].ObjectMeta)
+		stripEnv(&s.Pods[i].Spec)
 	}
 	for i := range s.Deployments {
 		clean(&s.Deployments[i].ObjectMeta)
+		stripEnv(&s.Deployments[i].Spec.Template.Spec)
 	}
 	for i := range s.StatefulSets {
 		clean(&s.StatefulSets[i].ObjectMeta)
+		stripEnv(&s.StatefulSets[i].Spec.Template.Spec)
 	}
 	for i := range s.DaemonSets {
 		clean(&s.DaemonSets[i].ObjectMeta)
+		stripEnv(&s.DaemonSets[i].Spec.Template.Spec)
 	}
 	for i := range s.Services {
 		clean(&s.Services[i].ObjectMeta)
@@ -206,6 +243,12 @@ func (s *Snapshot) scrub() {
 	}
 	for i := range s.LimitRanges {
 		clean(&s.LimitRanges[i].ObjectMeta)
+	}
+	for i := range s.NetworkPolicies {
+		clean(&s.NetworkPolicies[i].ObjectMeta)
+	}
+	for i := range s.Ingresses {
+		clean(&s.Ingresses[i].ObjectMeta)
 	}
 }
 

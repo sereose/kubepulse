@@ -6,10 +6,12 @@
 //	kubepulse --format json           # machine-readable output
 //	kubepulse --save snap.json        # also persist the collected snapshot
 //	kubepulse --load snap.json        # audit a snapshot offline (no cluster access)
+//	kubepulse --fail-below 70         # exit 2 if score < 70 (CI gate)
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -21,32 +23,61 @@ import (
 	"github.com/sereose/kubepulse/internal/snapshot"
 )
 
-var version = "dev"
+// Set by goreleaser via -ldflags.
+var (
+	version = "dev"
+	commit  = ""
+	date    = ""
+)
+
+// errScoreBelowThreshold is returned when --fail-below is not met.
+var errScoreBelowThreshold = errors.New("score below threshold")
 
 func main() {
-	if err := run(); err != nil {
+	err := run(os.Args[1:], os.Stdout, os.Stderr)
+	switch {
+	case err == nil:
+	case errors.Is(err, errScoreBelowThreshold):
+		os.Exit(2)
+	default:
 		fmt.Fprintln(os.Stderr, "kubepulse:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(args []string, stdout, stderr *os.File) error {
+	fs := flag.NewFlagSet("kubepulse", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	var (
-		kubeconfig  = flag.String("kubeconfig", "", "path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)")
-		kubeContext = flag.String("context", "", "kube-context to use (default: current)")
-		namespace   = flag.String("namespace", "", "restrict audit to one namespace (default: all)")
-		excludeNS   = flag.String("exclude-ns", "kube-system,kube-public,kube-node-lease", "comma-separated namespaces to ignore")
-		format      = flag.String("format", "md", "output format: md | json")
-		output      = flag.String("output", "", "write report to file instead of stdout")
-		save        = flag.String("save", "", "save collected snapshot to this JSON file")
-		load        = flag.String("load", "", "load snapshot from JSON file instead of querying a cluster")
-		timeout     = flag.Duration("timeout", 60*time.Second, "cluster query timeout")
-		showVersion = flag.Bool("version", false, "print version and exit")
+		kubeconfig  = fs.String("kubeconfig", "", "path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)")
+		kubeContext = fs.String("context", "", "kube-context to use (default: current)")
+		namespace   = fs.String("namespace", "", "restrict audit to one namespace (default: all)")
+		excludeNS   = fs.String("exclude-ns", "kube-system,kube-public,kube-node-lease", "comma-separated namespaces to ignore")
+		format      = fs.String("format", "md", "output format: md | json")
+		output      = fs.String("output", "", "write report to file instead of stdout")
+		save        = fs.String("save", "", "save collected snapshot to this JSON file")
+		load        = fs.String("load", "", "load snapshot from JSON file instead of querying a cluster")
+		timeout     = fs.Duration("timeout", 60*time.Second, "cluster query timeout")
+		failBelow   = fs.Int("fail-below", 0, "exit with code 2 if score is below this value (0 = disabled)")
+		nodeCost    = fs.Float64("node-monthly-cost", 0, "average $/node/month; enables $ estimates for idle capacity")
+		storageCost = fs.Float64("storage-cost-per-gi", 0, "$/Gi/month for persistent volumes; prices orphan PVCs (e.g. 0.10 for gp3)")
+		pendingSec  = fs.Int("pending-threshold", 600, "seconds before a Pending pod counts as stuck")
+		showVersion = fs.Bool("version", false, "print version and exit")
 	)
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if *showVersion {
-		fmt.Println("kubepulse", version)
+		v := version
+		if commit != "" {
+			v += " (" + commit
+			if date != "" {
+				v += ", " + date
+			}
+			v += ")"
+		}
+		fmt.Fprintln(stdout, "kubepulse", v)
 		return nil
 	}
 
@@ -75,11 +106,15 @@ func run() error {
 		if err := snap.SaveFile(*save); err != nil {
 			return fmt.Errorf("save snapshot: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "snapshot saved to %s\n", *save)
+		fmt.Fprintf(stderr, "snapshot saved to %s\n", *save)
 	}
 
-	excluded := splitCSV(*excludeNS)
-	findings := checks.RunAll(snap, checks.Options{ExcludedNamespaces: excluded})
+	findings := checks.RunAll(snap, checks.Options{
+		ExcludedNamespaces:      splitCSV(*excludeNS),
+		PendingThresholdSeconds: *pendingSec,
+		NodeMonthlyCost:         *nodeCost,
+		StorageMonthlyCostPerGi: *storageCost,
+	})
 	rep := report.Build(snap, findings, version)
 
 	var out string
@@ -96,13 +131,18 @@ func run() error {
 	}
 
 	if *output == "" {
-		fmt.Print(out)
-		return nil
+		fmt.Fprint(stdout, out)
+	} else {
+		if err := os.WriteFile(*output, []byte(out), 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintf(stderr, "report written to %s (score %d/100, grade %s)\n", *output, rep.Score, rep.Grade)
 	}
-	if err := os.WriteFile(*output, []byte(out), 0o644); err != nil {
-		return err
+
+	if *failBelow > 0 && rep.Score < *failBelow {
+		fmt.Fprintf(stderr, "score %d is below threshold %d\n", rep.Score, *failBelow)
+		return errScoreBelowThreshold
 	}
-	fmt.Fprintf(os.Stderr, "report written to %s (score %d/100)\n", *output, rep.Score)
 	return nil
 }
 

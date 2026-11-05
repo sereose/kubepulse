@@ -85,6 +85,10 @@ type Options struct {
 	ExcludedNamespaces []string
 	// PendingThresholdSeconds marks a Pending pod as stuck after this long.
 	PendingThresholdSeconds int
+	// NodeMonthlyCost, when > 0, lets cost checks express idle capacity in $.
+	NodeMonthlyCost float64
+	// StorageMonthlyCostPerGi, when > 0, prices orphan volumes.
+	StorageMonthlyCostPerGi float64
 }
 
 func (o Options) excluded(ns string) bool {
@@ -98,21 +102,35 @@ func (o Options) excluded(ns string) bool {
 
 // Registry is the ordered list of checks executed by RunAll.
 var Registry = []Check{
+	// Workloads
 	resourceRequests{},
 	singleReplica{},
 	missingProbes{},
 	latestImageTag{},
+	missingPDB{},
+	missingAntiAffinity{},
+	// Security
 	privilegedContainers{},
 	runAsRoot{},
 	hostNamespaces{},
-	missingPDB{},
+	serviceAccountToken{},
+	containerHardening{},
+	ingressWithoutTLS{},
+	// Namespaces
 	namespaceGuardrails{},
-	unhealthyPods{},
+	networkPolicyCoverage{},
+	// Pods
+	pendingPods{},
+	crashLoopPods{},
+	oomKilledPods{},
+	restartStorm{},
+	// Cost
 	orphanPVCs{},
 	loadBalancerSprawl{},
-	nodeHealth{},
 	nodeHeadroom{},
 	missingHPA{},
+	// Nodes
+	nodeHealth{},
 }
 
 // RunAll executes every registered check and returns findings sorted by
@@ -183,6 +201,8 @@ func workloads(s *snapshot.Snapshot, o Options) []workload {
 	}
 	return out
 }
+
+type corev1Capability = corev1.Capability
 
 func allContainers(t corev1.PodTemplateSpec) []corev1.Container {
 	return append(append([]corev1.Container{}, t.Spec.InitContainers...), t.Spec.Containers...)

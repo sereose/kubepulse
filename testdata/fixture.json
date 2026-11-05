@@ -1,0 +1,33 @@
+{
+  "collectedAt": "2026-11-04T10:00:00Z",
+  "serverVersion": "v1.31.2-eks",
+  "contextName": "demo-prod",
+  "namespaces": [{"metadata":{"name":"prod"}},{"metadata":{"name":"tools"}},{"metadata":{"name":"kube-system"}}],
+  "nodes": [
+    {"metadata":{"name":"ip-10-0-1-10"},"status":{"allocatable":{"cpu":"7910m","memory":"30Gi"},"conditions":[{"type":"Ready","status":"True"}]}},
+    {"metadata":{"name":"ip-10-0-1-11"},"status":{"allocatable":{"cpu":"7910m","memory":"30Gi"},"conditions":[{"type":"Ready","status":"True"},{"type":"DiskPressure","status":"True","message":"kubelet has disk pressure"}]}},
+    {"metadata":{"name":"ip-10-0-1-12"},"status":{"allocatable":{"cpu":"7910m","memory":"30Gi"},"conditions":[{"type":"Ready","status":"True"}]}}
+  ],
+  "pods": [
+    {"metadata":{"name":"api-6d9f-abc","namespace":"prod","creationTimestamp":"2026-11-01T00:00:00Z"},"spec":{"containers":[{"name":"api","image":"ghcr.io/acme/api:2.3.1","resources":{"requests":{"cpu":"500m","memory":"1Gi"}}}]},"status":{"phase":"Running","containerStatuses":[{"name":"api","restartCount":17,"state":{"running":{}},"lastState":{"terminated":{"reason":"OOMKilled"}}}]}},
+    {"metadata":{"name":"worker-0","namespace":"prod","creationTimestamp":"2026-11-03T00:00:00Z"},"spec":{"containers":[{"name":"w","image":"ghcr.io/acme/worker","resources":{}}],"volumes":[{"name":"d","persistentVolumeClaim":{"claimName":"worker-data"}}]},"status":{"phase":"Pending","conditions":[{"type":"PodScheduled","status":"False","message":"0/3 nodes are available: 3 Insufficient memory."}]}}
+  ],
+  "deployments": [
+    {"metadata":{"name":"api","namespace":"prod"},"spec":{"replicas":3,"template":{"metadata":{"labels":{"app":"api"}},"spec":{"containers":[{"name":"api","image":"ghcr.io/acme/api:2.3.1","resources":{"requests":{"cpu":"500m","memory":"1Gi"}},"readinessProbe":{}}]}}}},
+    {"metadata":{"name":"debug-box","namespace":"tools"},"spec":{"replicas":1,"template":{"metadata":{"labels":{"app":"debug"}},"spec":{"hostNetwork":true,"containers":[{"name":"shell","image":"ubuntu:latest","securityContext":{"privileged":true}}]}}}}
+  ],
+  "statefulSets": [],
+  "daemonSets": [],
+  "services": [
+    {"metadata":{"name":"api","namespace":"prod"},"spec":{"type":"LoadBalancer"}},
+    {"metadata":{"name":"grafana","namespace":"tools"},"spec":{"type":"LoadBalancer"}},
+    {"metadata":{"name":"argocd","namespace":"tools"},"spec":{"type":"LoadBalancer"}}
+  ],
+  "pvcs": [
+    {"metadata":{"name":"worker-data","namespace":"prod"},"spec":{"resources":{"requests":{"storage":"200Gi"}}},"status":{"phase":"Bound"}},
+    {"metadata":{"name":"old-postgres-0","namespace":"prod"},"spec":{"resources":{"requests":{"storage":"500Gi"}}},"status":{"phase":"Bound"}},
+    {"metadata":{"name":"tmp-restore","namespace":"tools"},"spec":{"resources":{"requests":{"storage":"100Gi"}}},"status":{"phase":"Bound"}}
+  ],
+  "pdbs": [], "hpas": [], "resourceQuotas": [], "limitRanges": [],
+  "warnings": ["list resourcequotas: resourcequotas is forbidden: User \"auditor\" cannot list resource"]
+}

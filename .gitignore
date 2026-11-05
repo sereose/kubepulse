@@ -1,6 +1,7 @@
 bin/
 dist/
 *.snapshot.json
+!testdata/*.json
 snap*.json
 report*.md
 report*.json

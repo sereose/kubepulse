@@ -1,0 +1,138 @@
+# Deliberately bad workloads for trying kubepulse on a throwaway cluster.
+# kubectl apply -f testdata/demo-workloads.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+---
+# Hits: WL001 WL002 WL003 WL004 SEC001 SEC002 SEC003 SEC004 SEC006
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: debug-box
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: debug-box}
+  template:
+    metadata:
+      labels: {app: debug-box}
+    spec:
+      hostNetwork: true
+      containers:
+        - name: shell
+          image: busybox:latest
+          command: ["sleep", "infinity"]
+          securityContext:
+            privileged: true
+---
+# Hits: WL005 WL006 COST004, plus SEC002/SEC004/SEC006 and a memory limit gap
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: api}
+  template:
+    metadata:
+      labels: {app: api}
+    spec:
+      containers:
+        - name: api
+          image: nginx:1.27.2
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+          readinessProbe:
+            httpGet: {path: /, port: 80}
+---
+# Hits: POD003 after a few minutes (OOMKilled), then POD002
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: leaky
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: leaky}
+  template:
+    metadata:
+      labels: {app: leaky}
+    spec:
+      containers:
+        - name: hog
+          image: polinux/stress:1.0.4
+          command: ["stress", "--vm", "1", "--vm-bytes", "64M", "--vm-hang", "0"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 32Mi}
+---
+# Hits: POD001 (unschedulable: absurd request)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: too-big
+  namespace: demo
+spec:
+  containers:
+    - name: c
+      image: busybox:1.36
+      command: ["sleep", "infinity"]
+      resources:
+        requests: {cpu: "64", memory: 512Gi}
+---
+# Hits: COST001 (never mounted)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: forgotten-backup
+  namespace: demo
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: {storage: 1Gi}
+---
+# Hits: COST002 (three LBs)
+apiVersion: v1
+kind: Service
+metadata: {name: lb-a, namespace: demo}
+spec:
+  type: LoadBalancer
+  selector: {app: api}
+  ports: [{port: 80}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: lb-b, namespace: demo}
+spec:
+  type: LoadBalancer
+  selector: {app: api}
+  ports: [{port: 80}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: lb-c, namespace: demo}
+spec:
+  type: LoadBalancer
+  selector: {app: api}
+  ports: [{port: 80}]
+---
+# Hits: SEC005 (no TLS)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  namespace: demo
+spec:
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: lb-a, port: {number: 80}}

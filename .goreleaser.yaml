@@ -1,0 +1,68 @@
+version: 2
+
+project_name: kubepulse
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: kubepulse
+    main: ./cmd/kubepulse
+    binary: kubepulse
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .ShortCommit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+
+release:
+  draft: false
+  prerelease: auto
+  footer: |
+    ## Install
+
+    ```bash
+    go install github.com/sereose/kubepulse/cmd/kubepulse@{{ .Tag }}
+    ```
+
+    Or download the archive for your platform above, extract, and put `kubepulse` on your PATH.
+
+# Uncomment once a `sereose/homebrew-tap` repository exists and a
+# HOMEBREW_TAP_GITHUB_TOKEN secret (repo scope) is configured.
+# brews:
+#   - repository:
+#       owner: sereose
+#       name: homebrew-tap
+#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+#     homepage: https://github.com/sereose/kubepulse
+#     description: Read-only Kubernetes audit — reliability, security, cost
+#     license: MIT
+#     test: system "#{bin}/kubepulse --version"

@@ -6,6 +6,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +30,15 @@ func deployment(ns, name string, replicas int32, c corev1.Container) appsv1.Depl
 	}
 }
 
+// hardened returns a Deployment that should produce zero findings except COST004.
+func hardened(ns, name string, replicas int32) appsv1.Deployment {
+	d := deployment(ns, name, replicas, goodContainer())
+	d.Spec.Template.Spec.ServiceAccountName = "app-sa"
+	d.Spec.Template.Spec.AutomountServiceAccountToken = ptr(false)
+	d.Spec.Template.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{TopologyKey: "kubernetes.io/hostname"}}
+	return d
+}
+
 func goodContainer() corev1.Container {
 	return corev1.Container{
 		Name:  "app",
@@ -37,9 +47,14 @@ func goodContainer() corev1.Container {
 			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("128Mi")},
 			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
 		},
-		ReadinessProbe:  &corev1.Probe{},
-		LivenessProbe:   &corev1.Probe{},
-		SecurityContext: &corev1.SecurityContext{RunAsNonRoot: ptr(true)},
+		ReadinessProbe: &corev1.Probe{},
+		LivenessProbe:  &corev1.Probe{},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsNonRoot:             ptr(true),
+			AllowPrivilegeEscalation: ptr(false),
+			ReadOnlyRootFilesystem:   ptr(true),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		},
 	}
 }
 
@@ -54,9 +69,9 @@ func findingsFor(fs []Finding, id string) []Finding {
 }
 
 func TestCleanWorkloadProducesNoWorkloadFindings(t *testing.T) {
-	d := deployment("prod", "api", 3, goodContainer())
 	snap := &snapshot.Snapshot{
-		Deployments: []appsv1.Deployment{d},
+		Nodes:       []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "a"}}, {ObjectMeta: metav1.ObjectMeta{Name: "b"}}},
+		Deployments: []appsv1.Deployment{hardened("prod", "api", 3)},
 		PDBs: []policyv1.PodDisruptionBudget{{
 			ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "prod"},
 			Spec:       policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}}},
@@ -64,7 +79,7 @@ func TestCleanWorkloadProducesNoWorkloadFindings(t *testing.T) {
 	}
 	fs := RunAll(snap, Options{})
 	for _, f := range fs {
-		if f.Category != Cost { // COST004 (no HPA) is expected for 3 pinned replicas
+		if f.CheckID != "COST004" { // 3 pinned replicas without HPA is expected
 			t.Errorf("unexpected finding %s: %s", f.CheckID, f.Message)
 		}
 	}
@@ -92,6 +107,8 @@ func TestBadWorkloadFlagsEverything(t *testing.T) {
 		"SEC001": Critical, // privileged
 		"SEC002": High,     // root allowed
 		"SEC003": High,     // hostNetwork
+		"SEC004": Medium,   // default SA token
+		"SEC006": Low,      // hardening
 	}
 	for id, sev := range want {
 		got := findingsFor(fs, id)
@@ -103,7 +120,6 @@ func TestBadWorkloadFlagsEverything(t *testing.T) {
 			t.Errorf("%s: want severity %s, got %s", id, sev, got[0].Severity)
 		}
 	}
-	// Sorted by severity desc: first must be the Critical one.
 	if fs[0].Severity != Critical {
 		t.Errorf("expected first finding Critical, got %s", fs[0].Severity)
 	}
@@ -111,9 +127,12 @@ func TestBadWorkloadFlagsEverything(t *testing.T) {
 
 func TestExcludedNamespaceIsSkipped(t *testing.T) {
 	d := deployment("kube-system", "coredns", 1, corev1.Container{Name: "c", Image: "coredns:latest"})
-	snap := &snapshot.Snapshot{Deployments: []appsv1.Deployment{d}}
+	snap := &snapshot.Snapshot{
+		Deployments: []appsv1.Deployment{d},
+		Pods:        []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "kube-system"}}},
+	}
 	if fs := RunAll(snap, Options{ExcludedNamespaces: []string{"kube-system"}}); len(fs) != 0 {
-		t.Errorf("expected no findings for excluded namespace, got %d", len(fs))
+		t.Errorf("expected no findings for excluded namespace, got %d: %+v", len(fs), fs)
 	}
 }
 
@@ -156,19 +175,25 @@ func TestOrphanPVCAndUsedPVC(t *testing.T) {
 			}}},
 		}},
 	}
-	fs := findingsFor(RunAll(snap, Options{}), "COST001")
-	// two orphans + one cluster-level total
-	if len(fs) != 3 {
+	fs := findingsFor(RunAll(snap, Options{StorageMonthlyCostPerGi: 0.10}), "COST001")
+	if len(fs) != 3 { // two orphans + one cluster-level total
 		t.Fatalf("expected 3 COST001 findings, got %d", len(fs))
 	}
-	for _, f := range fs {
-		if f.Object == "PersistentVolumeClaim/used" {
+	var total *Finding
+	for i := range fs {
+		if fs[i].Object == "PersistentVolumeClaim/used" {
 			t.Errorf("used PVC should not be flagged")
 		}
+		if fs[i].Object == "cluster" {
+			total = &fs[i]
+		}
+	}
+	if total == nil || !contains(total.Message, "~$20/month") {
+		t.Errorf("expected priced total, got %+v", total)
 	}
 }
 
-func TestStuckPendingAndCrashLoop(t *testing.T) {
+func TestPodHealthChecksAreSeparate(t *testing.T) {
 	now := time.Now()
 	snap := &snapshot.Snapshot{
 		CollectedAt: now,
@@ -188,15 +213,34 @@ func TestStuckPendingAndCrashLoop(t *testing.T) {
 					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
 				}}},
 			},
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "oom", Namespace: "app"},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+					Name: "c", RestartCount: 12,
+					State:                corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+					LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled"}},
+				}}},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "flappy", Namespace: "app"},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+					Name: "c", RestartCount: 15,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}}},
+			},
 		},
 	}
-	fs := findingsFor(RunAll(snap, Options{}), "POD001")
-	if len(fs) != 2 {
-		t.Fatalf("expected 2 POD001 findings (stuck + crash), got %d: %+v", len(fs), fs)
+	fs := RunAll(snap, Options{})
+	expect := map[string]string{"POD001": "stuck", "POD002": "crash", "POD003": "oom", "POD004": "flappy"}
+	for id, pod := range expect {
+		got := findingsFor(fs, id)
+		if len(got) != 1 || got[0].Object != "Pod/"+pod {
+			t.Errorf("%s: want exactly Pod/%s, got %+v", id, pod, got)
+		}
 	}
 }
 
-func TestNodeHeadroomOversized(t *testing.T) {
+func TestNodeHeadroomOversizedWithCost(t *testing.T) {
 	node := func(name string) corev1.Node {
 		return corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -211,12 +255,73 @@ func TestNodeHeadroomOversized(t *testing.T) {
 		Pods: []corev1.Pod{{
 			Status: corev1.PodStatus{Phase: corev1.PodRunning},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")},
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("6"), corev1.ResourceMemory: resource.MustParse("4Gi")},
 			}}}},
 		}},
 	}
-	fs := findingsFor(RunAll(snap, Options{}), "COST003")
+	// cpu 6/24 = 25%, mem 4/96 ≈ 4% → oversized; idle = 75% × 3 nodes × $200 = $450
+	fs := findingsFor(RunAll(snap, Options{NodeMonthlyCost: 200}), "COST003")
 	if len(fs) != 1 || fs[0].Severity != Medium {
 		t.Fatalf("expected one Medium oversized finding, got %+v", fs)
 	}
+	if !contains(fs[0].Message, "~$450/month") {
+		t.Errorf("expected cost estimate in message, got %q", fs[0].Message)
+	}
+}
+
+func TestNetworkPolicyCoverageAndIngressTLS(t *testing.T) {
+	snap := &snapshot.Snapshot{
+		Pods: []corev1.Pod{
+			{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "open"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "locked"}},
+		},
+		NetworkPolicies: []networkingv1.NetworkPolicy{{ObjectMeta: metav1.ObjectMeta{Name: "deny", Namespace: "locked"}}},
+		Ingresses: []networkingv1.Ingress{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: "open"},
+				Spec:       networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{{Host: "app.example.com"}}},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "secure", Namespace: "open"},
+				Spec: networkingv1.IngressSpec{
+					TLS:   []networkingv1.IngressTLS{{Hosts: []string{"api.example.com"}}},
+					Rules: []networkingv1.IngressRule{{Host: "api.example.com"}},
+				},
+			},
+		},
+	}
+	fs := RunAll(snap, Options{})
+	np := findingsFor(fs, "NS002")
+	if len(np) != 1 || np[0].Namespace != "open" {
+		t.Errorf("NS002: want only namespace 'open', got %+v", np)
+	}
+	tls := findingsFor(fs, "SEC005")
+	if len(tls) != 1 || tls[0].Object != "Ingress/plain" {
+		t.Errorf("SEC005: want only Ingress/plain, got %+v", tls)
+	}
+}
+
+func TestAntiAffinityNeedsTwoNodes(t *testing.T) {
+	d := deployment("prod", "api", 2, goodContainer())
+	one := &snapshot.Snapshot{Nodes: []corev1.Node{{}}, Deployments: []appsv1.Deployment{d}}
+	if fs := findingsFor(RunAll(one, Options{}), "WL006"); len(fs) != 0 {
+		t.Errorf("single-node cluster should not flag WL006")
+	}
+	two := &snapshot.Snapshot{Nodes: []corev1.Node{{}, {}}, Deployments: []appsv1.Deployment{d}}
+	if fs := findingsFor(RunAll(two, Options{}), "WL006"); len(fs) != 1 {
+		t.Errorf("expected WL006 on two-node cluster, got %d", len(fs))
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
 }
