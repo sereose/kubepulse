@@ -30,6 +30,21 @@ func TestScoreAndGrade(t *testing.T) {
 	}
 }
 
+func TestPerCheckPenaltyCap(t *testing.T) {
+	var fs []checks.Finding
+	for i := 0; i < 40; i++ {
+		fs = append(fs, checks.Finding{CheckID: "SEC002", Severity: checks.High, Category: checks.Security})
+	}
+	r := Build(&snapshot.Snapshot{}, fs, "test")
+	// 40 × High would be 320 penalty → 0. Capped at 3 × 8 = 24 → 76.
+	if r.Score != 76 {
+		t.Errorf("score = %d, want 76 (per-check cap)", r.Score)
+	}
+	if r.Summary.Total != 40 || r.Summary.BySeverity["HIGH"] != 40 {
+		t.Errorf("summary must still count every finding: %+v", r.Summary)
+	}
+}
+
 func TestMarkdownContainsEssentials(t *testing.T) {
 	snap := &snapshot.Snapshot{ServerVersion: "v1.31.0", ContextName: "test"}
 	fs := []checks.Finding{

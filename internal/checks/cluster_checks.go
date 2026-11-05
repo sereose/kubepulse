@@ -242,23 +242,35 @@ func (c orphanPVCs) Run(s *snapshot.Snapshot, o Options) []Finding {
 	}
 	var out []Finding
 	var total resource.Quantity
+	bound := 0
 	for _, pvc := range s.PVCs {
 		if o.excluded(pvc.Namespace) || used[pvc.Namespace+"/"+pvc.Name] {
 			continue
 		}
 		size := pvc.Spec.Resources.Requests.Storage()
+		if pvc.Status.Phase != corev1.ClaimBound {
+			// Not provisioned yet (WaitForFirstConsumer) or lost: no storage is billed.
+			out = append(out, Finding{
+				CheckID: c.ID(), Title: c.Title(), Severity: Low, Category: Hygiene,
+				Namespace: pvc.Namespace, Object: "PersistentVolumeClaim/" + pvc.Name,
+				Message:     fmt.Sprintf("%s claim is %s and referenced by no pod", size.String(), pvc.Status.Phase),
+				Remediation: "Likely a leftover from a deleted workload. Delete it, or wire it to the pod that should consume it.",
+			})
+			continue
+		}
 		if size != nil {
 			total.Add(*size)
 		}
+		bound++
 		out = append(out, Finding{
 			CheckID: c.ID(), Title: c.Title(), Severity: Medium, Category: Cost,
 			Namespace: pvc.Namespace, Object: "PersistentVolumeClaim/" + pvc.Name,
-			Message:     fmt.Sprintf("%s (%s) is bound but unused", size.String(), pvc.Status.Phase),
+			Message:     fmt.Sprintf("%s volume is provisioned and billed but mounted by no pod", size.String()),
 			Remediation: "Confirm the data is not needed (or snapshot it), then delete the PVC. Unmounted volumes are billed every month. Beware StatefulSet PVCs that survive scale-down by design.",
 		})
 	}
-	if len(out) > 1 {
-		msg := fmt.Sprintf("%d orphan PVCs totalling %s of billed storage", len(out), total.String())
+	if bound > 1 {
+		msg := fmt.Sprintf("%d orphan bound PVCs totalling %s of billed storage", bound, total.String())
 		if o.StorageMonthlyCostPerGi > 0 {
 			gi := float64(total.Value()) / (1 << 30)
 			msg += fmt.Sprintf(" (~$%.0f/month at $%.2f/Gi)", gi*o.StorageMonthlyCostPerGi, o.StorageMonthlyCostPerGi)
@@ -401,7 +413,9 @@ func (c nodeHeadroom) Run(s *snapshot.Snapshot, o Options) []Finding {
 		allocMem.Add(*n.Status.Allocatable.Memory())
 	}
 	for _, p := range s.Pods {
-		if p.Status.Phase != corev1.PodRunning && p.Status.Phase != corev1.PodPending {
+		// Only pods that actually occupy a node. An unschedulable Pending pod
+		// has no NodeName and must not inflate the requested total.
+		if p.Spec.NodeName == "" || (p.Status.Phase != corev1.PodRunning && p.Status.Phase != corev1.PodPending) {
 			continue
 		}
 		for _, ct := range p.Spec.Containers {
@@ -416,7 +430,7 @@ func (c nodeHeadroom) Run(s *snapshot.Snapshot, o Options) []Finding {
 	memPct := float64(reqMem.Value()) / float64(allocMem.Value()) * 100
 
 	summary := fmt.Sprintf("requests use %.0f%% of allocatable CPU (%s / %s) and %.0f%% of memory (%s / %s) across %d schedulable nodes",
-		cpuPct, reqCPU.String(), allocCPU.String(), memPct, humanBytes(reqMem.Value()), humanBytes(allocMem.Value()), schedulable)
+		cpuPct, humanCPU(reqCPU.MilliValue()), humanCPU(allocCPU.MilliValue()), memPct, humanBytes(reqMem.Value()), humanBytes(allocMem.Value()), schedulable)
 
 	// Idle share = capacity not covered by the busier of the two dimensions.
 	busiest := cpuPct
@@ -458,6 +472,14 @@ func (c nodeHeadroom) Run(s *snapshot.Snapshot, o Options) []Finding {
 		})
 	}
 	return out
+}
+
+// humanCPU renders millicores as "2 cores" / "1.5 cores" / "250m".
+func humanCPU(milli int64) string {
+	if milli >= 1000 {
+		return fmt.Sprintf("%.3g cores", float64(milli)/1000)
+	}
+	return fmt.Sprintf("%dm", milli)
 }
 
 func humanBytes(b int64) string {

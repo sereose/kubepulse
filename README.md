@@ -34,7 +34,7 @@ kubepulse                                   # audit current context, Markdown to
 kubepulse --context prod --output audit.md  # pick a context, write to file
 kubepulse --format json | jq '.score'       # machine-readable
 kubepulse --namespace payments              # one namespace only
-kubepulse --exclude-ns kube-system,istio-system,monitoring
+kubepulse --exclude-ns kube-system,istio-system,monitoring   # default also skips local-path-storage and GKE/EKS system namespaces
 ```
 
 ### Put a price on it
@@ -93,17 +93,17 @@ kubepulse --context kind-kubepulse-demo
 | SEC006 | Security | Low | Missing `allowPrivilegeEscalation: false`, read-only rootfs, `drop: [ALL]` |
 | NS001 | Hygiene | Low | Active namespaces without ResourceQuota / LimitRange |
 | NS002 | Security | Medium | Active namespaces without any NetworkPolicy |
-| POD001 | Reliability | High | Pods stuck in Pending (default > 10 min) |
+| POD001 | Reliability | High | Pods stuck in Pending (default > 5 min) |
 | POD002 | Reliability | High | Containers in CrashLoopBackOff |
 | POD003 | Reliability | High | Containers recently OOMKilled |
 | POD004 | Reliability | Medium | Running containers with ≥10 restarts |
-| COST001 | Cost | Medium | PVCs not mounted by any pod (+ priced total) |
+| COST001 | Cost/Hygiene | Medium/Low | Bound PVCs mounted by no pod (+ priced total); unbound leftovers as Low |
 | COST002 | Cost | Medium | 3+ `LoadBalancer` services (one cloud LB each) |
 | COST003 | Cost/Reliability | Medium/High | Requests vs allocatable: oversized (+ $ idle) or no headroom |
 | COST004 | Cost | Low | ≥3 pinned replicas with no HPA |
 | NODE001 | Reliability | Critical/High | Nodes NotReady or under memory/disk/PID pressure |
 
-Score: 100 minus Critical=15, High=8, Medium=3, Low=1 per finding, with diminishing penalties after 40 points. Grades A ≥90, B ≥75, C ≥60, D ≥40.
+Score: 100 minus Critical=15, High=8, Medium=3, Low=1 per finding. At most 3 findings per check count toward the score (so one systemic gap across 40 Deployments does not zero it), with diminishing penalties after 40 points. Grades A ≥90, B ≥75, C ≥60, D ≥40.
 
 Findings are heuristics. A `hostNetwork` DaemonSet is usually a CNI agent; a single-replica Deployment may be a cron-like worker. The report tells you what to look at, not what to do blindly.
 

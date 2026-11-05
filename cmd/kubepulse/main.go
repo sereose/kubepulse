@@ -30,6 +30,10 @@ var (
 	date    = ""
 )
 
+// defaultExcludedNS lists control-plane and distribution-specific namespaces
+// whose workloads the user does not own and cannot fix.
+const defaultExcludedNS = "kube-system,kube-public,kube-node-lease,local-path-storage,gke-managed-system,gke-gmp-system,gmp-system,aws-observability"
+
 // errScoreBelowThreshold is returned when --fail-below is not met.
 var errScoreBelowThreshold = errors.New("score below threshold")
 
@@ -52,7 +56,7 @@ func run(args []string, stdout, stderr *os.File) error {
 		kubeconfig  = fs.String("kubeconfig", "", "path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)")
 		kubeContext = fs.String("context", "", "kube-context to use (default: current)")
 		namespace   = fs.String("namespace", "", "restrict audit to one namespace (default: all)")
-		excludeNS   = fs.String("exclude-ns", "kube-system,kube-public,kube-node-lease", "comma-separated namespaces to ignore")
+		excludeNS   = fs.String("exclude-ns", defaultExcludedNS, "comma-separated namespaces to ignore")
 		format      = fs.String("format", "md", "output format: md | json")
 		output      = fs.String("output", "", "write report to file instead of stdout")
 		save        = fs.String("save", "", "save collected snapshot to this JSON file")
@@ -61,7 +65,7 @@ func run(args []string, stdout, stderr *os.File) error {
 		failBelow   = fs.Int("fail-below", 0, "exit with code 2 if score is below this value (0 = disabled)")
 		nodeCost    = fs.Float64("node-monthly-cost", 0, "average $/node/month; enables $ estimates for idle capacity")
 		storageCost = fs.Float64("storage-cost-per-gi", 0, "$/Gi/month for persistent volumes; prices orphan PVCs (e.g. 0.10 for gp3)")
-		pendingSec  = fs.Int("pending-threshold", 600, "seconds before a Pending pod counts as stuck")
+		pendingSec  = fs.Int("pending-threshold", 300, "seconds before a Pending pod counts as stuck")
 		showVersion = fs.Bool("version", false, "print version and exit")
 	)
 	if err := fs.Parse(args); err != nil {

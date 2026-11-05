@@ -72,17 +72,31 @@ func Build(s *snapshot.Snapshot, findings []checks.Finding, version string) *Rep
 			ByCategory: map[string]int{},
 		},
 	}
-	penalty := 0
+	// Penalty is capped per check: one systemic gap (say, no runAsNonRoot on
+	// 40 Deployments) should hurt, but not more than three times its weight.
+	// Otherwise every real cluster scores F and the number stops meaning anything.
+	perCheck := map[string]int{}
+	perCheckCount := map[string]int{}
 	for _, f := range findings {
 		r.Summary.BySeverity[f.Severity.String()]++
 		r.Summary.ByCategory[string(f.Category)]++
-		penalty += f.Severity.Penalty()
+		if perCheckCount[f.CheckID] < maxPenalizedPerCheck {
+			perCheck[f.CheckID] += f.Severity.Penalty()
+			perCheckCount[f.CheckID]++
+		}
+	}
+	penalty := 0
+	for _, p := range perCheck {
+		penalty += p
 	}
 	// Diminishing penalty: many Low findings should not drive a cluster to 0.
 	r.Score = score(penalty)
 	r.Grade = grade(r.Score)
 	return r
 }
+
+// maxPenalizedPerCheck is how many findings of one check count toward the score.
+const maxPenalizedPerCheck = 3
 
 func score(penalty int) int {
 	// Linear up to 40 points, then each extra point of penalty costs half.
@@ -184,7 +198,7 @@ func (r *Report) Markdown() string {
 		w("\n")
 	}
 
-	w("---\n*Read-only audit. Scores weight Critical=15, High=8, Medium=3, Low=1 with diminishing penalties. ")
+	w("---\n*Read-only audit. Score weights Critical=15, High=8, Medium=3, Low=1; at most %d findings per check count, with diminishing penalties after 40 points. ", maxPenalizedPerCheck)
 	w("Findings are heuristics: review each against your context before acting.*\n")
 	return b.String()
 }

@@ -252,20 +252,43 @@ func TestNodeHeadroomOversizedWithCost(t *testing.T) {
 	}
 	snap := &snapshot.Snapshot{
 		Nodes: []corev1.Node{node("a"), node("b"), node("c")},
-		Pods: []corev1.Pod{{
-			Status: corev1.PodStatus{Phase: corev1.PodRunning},
-			Spec: corev1.PodSpec{Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("6"), corev1.ResourceMemory: resource.MustParse("4Gi")},
-			}}}},
-		}},
+		Pods: []corev1.Pod{
+			{
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+				Spec: corev1.PodSpec{NodeName: "a", Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("6"), corev1.ResourceMemory: resource.MustParse("4Gi")},
+				}}}},
+			},
+			// Unschedulable monster: must NOT be counted (no NodeName).
+			{
+				Status: corev1.PodStatus{Phase: corev1.PodPending},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("64"), corev1.ResourceMemory: resource.MustParse("512Gi")},
+				}}}},
+			},
+		},
 	}
 	// cpu 6/24 = 25%, mem 4/96 ≈ 4% → oversized; idle = 75% × 3 nodes × $200 = $450
 	fs := findingsFor(RunAll(snap, Options{NodeMonthlyCost: 200}), "COST003")
 	if len(fs) != 1 || fs[0].Severity != Medium {
 		t.Fatalf("expected one Medium oversized finding, got %+v", fs)
 	}
-	if !contains(fs[0].Message, "~$450/month") {
-		t.Errorf("expected cost estimate in message, got %q", fs[0].Message)
+	if !contains(fs[0].Message, "~$450/month") || !contains(fs[0].Message, "6 cores / 24 cores") {
+		t.Errorf("unexpected message: %q", fs[0].Message)
+	}
+}
+
+func TestOrphanPVCPendingIsHygieneNotCost(t *testing.T) {
+	snap := &snapshot.Snapshot{PVCs: []corev1.PersistentVolumeClaim{{
+		ObjectMeta: metav1.ObjectMeta{Name: "waiting", Namespace: "a"},
+		Spec: corev1.PersistentVolumeClaimSpec{Resources: corev1.VolumeResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+		}},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending},
+	}}}
+	fs := findingsFor(RunAll(snap, Options{}), "COST001")
+	if len(fs) != 1 || fs[0].Severity != Low || fs[0].Category != Hygiene || contains(fs[0].Message, "bound") {
+		t.Errorf("pending PVC should be a Low hygiene finding, got %+v", fs)
 	}
 }
 
