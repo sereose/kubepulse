@@ -14,15 +14,15 @@ import (
 
 // Report is the full audit result.
 type Report struct {
-	Tool        string    `json:"tool"`
-	Version     string    `json:"version"`
-	GeneratedAt time.Time `json:"generatedAt"`
-	Cluster     Cluster   `json:"cluster"`
-	Score       int       `json:"score"` // 0–100
-	Grade       string    `json:"grade"` // A–F
-	Summary     Summary   `json:"summary"`
+	Tool        string           `json:"tool"`
+	Version     string           `json:"version"`
+	GeneratedAt time.Time        `json:"generatedAt"`
+	Cluster     Cluster          `json:"cluster"`
+	Score       int              `json:"score"` // 0–100
+	Grade       string           `json:"grade"` // A–F
+	Summary     Summary          `json:"summary"`
 	Findings    []checks.Finding `json:"findings"`
-	Warnings    []string  `json:"warnings,omitempty"`
+	Warnings    []string         `json:"warnings,omitempty"`
 }
 
 // Cluster is the inventory header.

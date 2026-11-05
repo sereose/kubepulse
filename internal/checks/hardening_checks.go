@@ -93,8 +93,10 @@ func dropsAll(drop []corev1Capability) bool {
 
 type missingAntiAffinity struct{}
 
-func (missingAntiAffinity) ID() string    { return "WL006" }
-func (missingAntiAffinity) Title() string { return "Multi-replica workloads without spreading across nodes" }
+func (missingAntiAffinity) ID() string { return "WL006" }
+func (missingAntiAffinity) Title() string {
+	return "Multi-replica workloads without spreading across nodes"
+}
 
 // Two replicas on the same node are one node failure away from zero.
 func (c missingAntiAffinity) Run(s *snapshot.Snapshot, o Options) []Finding {
