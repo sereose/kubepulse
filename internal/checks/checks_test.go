@@ -238,6 +238,42 @@ func TestPodHealthChecksAreSeparate(t *testing.T) {
 			t.Errorf("%s: want exactly Pod/%s, got %+v", id, pod, got)
 		}
 	}
+	if msg := findingsFor(fs, "POD001")[0].Message; !contains(msg, "Pending for 1h0m:") {
+		t.Errorf("duration format: %q", msg)
+	}
+}
+
+func TestOOMCrashLoopReportedOnce(t *testing.T) {
+	snap := &snapshot.Snapshot{Pods: []corev1.Pod{{
+		ObjectMeta: metav1.ObjectMeta{Name: "leaky", Namespace: "app"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "hog", RestartCount: 15,
+			State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+			LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled"}},
+		}}},
+	}}}
+	fs := RunAll(snap, Options{})
+	if len(findingsFor(fs, "POD002")) != 0 {
+		t.Error("OOM-driven crash loop must not also be a POD002 finding")
+	}
+	oom := findingsFor(fs, "POD003")
+	if len(oom) != 1 || !contains(oom[0].Message, "CrashLoopBackOff") {
+		t.Errorf("POD003 should mention the crash loop: %+v", oom)
+	}
+}
+
+func TestHumanDuration(t *testing.T) {
+	cases := map[time.Duration]string{
+		55 * time.Minute:             "55m",
+		3*time.Hour + 20*time.Minute: "3h20m",
+		52*time.Hour + 4*time.Minute: "2d4h",
+		34*time.Hour + 0*time.Minute: "1d10h",
+	}
+	for d, want := range cases {
+		if got := humanDuration(d); got != want {
+			t.Errorf("humanDuration(%v) = %q, want %q", d, got, want)
+		}
+	}
 }
 
 func TestNodeHeadroomOversizedWithCost(t *testing.T) {

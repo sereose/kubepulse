@@ -121,7 +121,7 @@ func (c pendingPods) Run(s *snapshot.Snapshot, o Options) []Finding {
 		out = append(out, Finding{
 			CheckID: c.ID(), Title: c.Title(), Severity: High, Category: Reliability,
 			Namespace: p.Namespace, Object: "Pod/" + p.Name,
-			Message:     fmt.Sprintf("Pending for %s: %s", age.Round(time.Minute), truncate(reason, 160)),
+			Message:     fmt.Sprintf("Pending for %s: %s", humanDuration(age), truncate(reason, 160)),
 			Remediation: "Check `kubectl describe pod` events. Usual causes: requests exceed any node, missing PVC/StorageClass, node selector/taint mismatch, or image pull failure.",
 		})
 	}
@@ -143,6 +143,10 @@ func (c crashLoopPods) Run(s *snapshot.Snapshot, o Options) []Finding {
 		}
 		for _, cs := range p.Status.ContainerStatuses {
 			if cs.State.Waiting == nil || cs.State.Waiting.Reason != "CrashLoopBackOff" {
+				continue
+			}
+			// OOM-driven crash loops are reported once, by POD003.
+			if t := cs.LastTerminationState.Terminated; t != nil && t.Reason == "OOMKilled" {
 				continue
 			}
 			out = append(out, Finding{
@@ -174,10 +178,14 @@ func (c oomKilledPods) Run(s *snapshot.Snapshot, o Options) []Finding {
 			if t == nil || t.Reason != "OOMKilled" {
 				continue
 			}
+			state := ""
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
+				state = ", now in CrashLoopBackOff"
+			}
 			out = append(out, Finding{
 				CheckID: c.ID(), Title: c.Title(), Severity: High, Category: Reliability,
 				Namespace: p.Namespace, Object: "Pod/" + p.Name,
-				Message:     fmt.Sprintf("container %q was OOMKilled (%d restarts)", cs.Name, cs.RestartCount),
+				Message:     fmt.Sprintf("container %q was OOMKilled (%d restarts%s)", cs.Name, cs.RestartCount, state),
 				Remediation: "Raise the memory limit to the observed peak plus headroom, or fix the leak. Check for JVM/Node heap flags that ignore cgroup limits.",
 			})
 		}
@@ -215,6 +223,22 @@ func (c restartStorm) Run(s *snapshot.Snapshot, o Options) []Finding {
 		}
 	}
 	return out
+}
+
+// humanDuration renders "55m", "3h20m", "2d4h" — no seconds.
+func humanDuration(d time.Duration) string {
+	d = d.Round(time.Minute)
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	mins := int(d.Minutes()) % 60
+	switch {
+	case days > 0:
+		return fmt.Sprintf("%dd%dh", days, hours)
+	case hours > 0:
+		return fmt.Sprintf("%dh%dm", hours, mins)
+	default:
+		return fmt.Sprintf("%dm", mins)
+	}
 }
 
 func truncate(s string, n int) string {
@@ -294,19 +318,29 @@ func (loadBalancerSprawl) Title() string { return "Many Services of type LoadBal
 
 func (c loadBalancerSprawl) Run(s *snapshot.Snapshot, o Options) []Finding {
 	var lbs []string
+	provisioned := 0
 	for _, svc := range s.Services {
 		if o.excluded(svc.Namespace) || svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
 			continue
 		}
 		lbs = append(lbs, svc.Namespace+"/"+svc.Name)
+		if len(svc.Status.LoadBalancer.Ingress) > 0 {
+			provisioned++
+		}
 	}
 	if len(lbs) < 3 {
 		return nil
 	}
+	note := ""
+	if provisioned == 0 {
+		note = " — none has an external address yet (local cluster or missing LB controller); on a cloud each would be billed"
+	} else if provisioned < len(lbs) {
+		note = fmt.Sprintf(" — %d of them still have no external address", len(lbs)-provisioned)
+	}
 	return []Finding{{
 		CheckID: c.ID(), Title: c.Title(), Severity: Medium, Category: Cost,
 		Object:      "cluster",
-		Message:     fmt.Sprintf("%d LoadBalancer services, each a billed cloud LB (~$15–25/month + traffic): %s", len(lbs), strings.Join(lbs, ", ")),
+		Message:     fmt.Sprintf("%d LoadBalancer services, each a billed cloud LB (~$15–25/month + traffic): %s%s", len(lbs), strings.Join(lbs, ", "), note),
 		Remediation: "Route HTTP services through a single Ingress controller / Gateway API with one LB. Keep dedicated LBs only for non-HTTP or isolation requirements.",
 	}}
 }
